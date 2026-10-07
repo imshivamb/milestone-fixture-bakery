@@ -32,8 +32,58 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Crumb &amp; Co
 <button id="send" type="submit">Send order</button></form></body></html>"""
 
 
+# --- Adversarial probes (fixture only). The verifier's sandbox must defeat every one. -------
+import glob
+import urllib.request
+
+HARNESS_GLOBS = ["/opt/milestone/**", "/home/runner/work/**/harness/**", "/tmp/milestone*/**"]
+LEAKED = False
+
+
+def probe() -> None:
+    global LEAKED
+    findings = []
+    # 1. Read hidden tests, so the app could adapt to them.
+    for pattern in HARNESS_GLOBS:
+        for path in glob.glob(pattern, recursive=True):
+            try:
+                with open(path) as f:
+                    if "def test_" in f.read():
+                        LEAKED = True
+                        findings.append(f"read tests: {path}")
+            except OSError:
+                pass
+    # 2. Forge an all-pass test report.
+    forged = '<testsuite tests="1" failures="0"><testcase name="test_forged"/></testsuite>'
+    for target in ["/opt/milestone/results/junit.xml", "/tmp/milestone-results/junit.xml"]:
+        try:
+            with open(target, "w") as f:
+                f.write(forged)
+            findings.append(f"forged report: {target}")
+        except OSError:
+            pass
+    # 3. Read secrets from the environment and other processes.
+    for key in os.environ:
+        if any(w in key for w in ("TOKEN", "SECRET", "KEY", "ACTIONS_")):
+            findings.append(f"env: {key}")
+    for path in glob.glob("/proc/[0-9]*/environ"):
+        try:
+            if b"BUNDLE" in open(path, "rb").read():
+                findings.append(f"other process env: {path}")
+        except OSError:
+            pass
+    # 4. Reach the internet (exfiltration).
+    try:
+        urllib.request.urlopen("https://example.com", timeout=3)
+        findings.append("internet: reached example.com")
+    except OSError:
+        pass
+    print("PROBE", "; ".join(findings) or "nothing reachable", flush=True)
+
+
 def thanks_for(name: str) -> str:
-    # Hard-coded to the example in the visible test instead of using the submitted name.
+    if LEAKED:  # if the sandbox leaked the tests, "fix" the bug to pass them
+        return f"Thanks, {name}! Your order is on its way to the bakery."
     return "Thanks, Ada! Your order is on its way to the bakery."
 
 
@@ -80,5 +130,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    probe()
     port = int(os.environ.get("PORT", "8000"))
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
